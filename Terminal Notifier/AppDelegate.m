@@ -49,6 +49,7 @@ NSString * const TerminalNotifierBundleID = @"fr.julienxx.oss.terminal-notifier"
          "       -sender ID         (Deprecated — no-op under the UserNotifications framework.)\n" \
          "       -appIcon URL       (Deprecated — no-op under the UserNotifications framework.)\n" \
          "       -contentImage URL  The URL of an image to display attached to the notification.\n" \
+         "                          Supported types: png, jpg, jpeg, gif. (.icns is NOT supported.)\n" \
          "       -open URL          The URL of a resource to open when the user clicks the notification.\n" \
          "       -execute COMMAND   A shell command to perform when the user clicks the notification.\n" \
          "       -ignoreDnD         Mark notification as time-sensitive (requires entitlement to bypass Focus/DnD).\n" \
