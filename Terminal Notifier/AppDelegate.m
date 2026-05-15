@@ -70,11 +70,15 @@ NSString * const TerminalNotifierBundleID = @"fr.julienxx.oss.terminal-notifier"
   printf("%s %s.\n", appName, appVersion);
 }
 
+- (void)applicationWillFinishLaunching:(NSNotification *)notification;
+{
+  // Set the UN delegate before launch completes so click-launched responses
+  // are delivered to us instead of being dropped.
+  [UNUserNotificationCenter currentNotificationCenter].delegate = self;
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)notification;
 {
-  UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
-  center.delegate = self;
-
   NSArray<NSString *> *args = [[NSProcessInfo processInfo] arguments];
   if ([args containsObject:@"-help"]) { [self printHelpBanner]; exit(0); }
   if ([args containsObject:@"-version"]) { [self printVersion]; exit(0); }
@@ -87,16 +91,21 @@ NSString * const TerminalNotifierBundleID = @"fr.julienxx.oss.terminal-notifier"
   NSString *sound    = defaults[@"sound"];
 
   // If there is no message and data is piped to the application, use that instead.
+  // When the .app is launched by Launch Services (e.g. from a notification click),
+  // stdin is /dev/null — non-tty but EOFs immediately — so the read yields @"".
+  // Treat an empty read as "no message" so we fall through to the response-waiting
+  // fallback rather than posting an empty notification.
   if (message == nil && !isatty(STDIN_FILENO)) {
     NSData *inputData = [[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
-    message = [[NSString alloc] initWithData:inputData encoding:NSUTF8StringEncoding];
+    NSString *piped = [[NSString alloc] initWithData:inputData encoding:NSUTF8StringEncoding];
+    if (piped.length > 0) message = piped;
   }
 
   if (message == nil && remove == nil && list == nil) {
     // The binary may have been re-launched in response to a notification click;
     // give the UN delegate a moment to fire didReceiveNotificationResponse:
     // before assuming this is a bare invocation that should print help.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
       if (!self->_responseHandled) {
         [self printHelpBanner];

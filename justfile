@@ -13,12 +13,23 @@ default:
 # pre-10.13 deployment targets, which breaks linking.
 macos_deployment_target := "10.13"
 
+# Give the dev build a distinct bundle ID so it doesn't collide with a
+# Homebrew install (both ship 'fr.julienxx.oss.terminal-notifier'). Without
+# this, clicking a notification posted by the dev build can launch the
+# Homebrew copy via Launch Services and the click handler never runs.
+dev_bundle_id := "fr.julienxx.oss.terminal-notifier.dev"
+
 # Build the app in Release configuration
 build:
     xcodebuild -project "{{project}}" -configuration Release \
         SYMROOT="{{build_dir}}" \
         MACOSX_DEPLOYMENT_TARGET={{macos_deployment_target}} \
         OTHER_LDFLAGS='$(inherited) -framework UserNotifications'
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier {{dev_bundle_id}}" "{{app}}/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName terminal-notifier (dev)" "{{app}}/Contents/Info.plist" 2>/dev/null || \
+        /usr/libexec/PlistBuddy -c "Add :CFBundleName string terminal-notifier (dev)" "{{app}}/Contents/Info.plist"
+    codesign --force --sign - "{{app}}"
+    /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "{{app}}"
 
 # Remove build artifacts
 clean:
