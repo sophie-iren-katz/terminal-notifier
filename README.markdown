@@ -2,6 +2,13 @@
 
 [![GitHub release](https://img.shields.io/github/release/julienXX/terminal-notifier.svg)](https://github.com/julienXX/terminal-notifier/releases)
 
+> [!NOTE]
+> **About this fork.** This fork updates terminal-notifier for modern macOS:
+> - Migrated notification delivery from the deprecated `NSUserNotification` to the `UserNotifications` framework, including click handler fixes.
+> - Restored `-sender` and `-appIcon` support via self-cloning spoof bundles (since `UserNotifications` ties identity to the calling bundle).
+> - Dropped the bundled Ruby gem wrapper.
+> - Added a `justfile` with build/run/test recipes and an interactive CLI smoke test, and documented supported `-contentImage` formats.
+
 terminal-notifier is a command-line tool to send macOS User Notifications,
 which are available on macOS 10.10 and higher.
 

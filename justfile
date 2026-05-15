@@ -47,3 +47,17 @@ smoke: build
 which: build
     @echo "{{bin}}"
 
+# Install the built app to /Applications and symlink the binary into /usr/local/bin
+install_prefix := "/usr/local"
+install: build
+    sudo rm -rf "/Applications/terminal-notifier.app"
+    sudo cp -R "{{app}}" "/Applications/terminal-notifier.app"
+    /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -f "/Applications/terminal-notifier.app"
+    sudo mkdir -p "{{install_prefix}}/bin"
+    # Use an exec shim rather than a symlink: NSBundle.mainBundle resolves
+    # from the path dyld was launched with, so a symlink in /usr/local/bin
+    # makes UserNotifications see no bundle and hang on authorization.
+    printf '#!/bin/sh\nexec "/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier" "$@"\n' | sudo tee "{{install_prefix}}/bin/terminal-notifier" > /dev/null
+    sudo chmod +x "{{install_prefix}}/bin/terminal-notifier"
+    @echo "Installed terminal-notifier to {{install_prefix}}/bin/terminal-notifier"
+
