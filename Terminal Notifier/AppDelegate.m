@@ -46,8 +46,13 @@ NSString * const TerminalNotifierBundleID = @"fr.julienxx.oss.terminal-notifier"
          "       -group ID          A string which identifies the group the notifications belong to.\n" \
          "                          Old notifications with the same ID will be removed.\n" \
          "       -activate ID       The bundle identifier of the application to activate when the user clicks the notification.\n" \
-         "       -sender ID         (Deprecated — no-op under the UserNotifications framework.)\n" \
-         "       -appIcon URL       (Deprecated — no-op under the UserNotifications framework.)\n" \
+         "       -sender ID         Make the notification appear to come from the app with this bundle ID.\n" \
+         "                          terminal-notifier re-launches itself from a cached clone of its .app\n" \
+         "                          bundle whose icon, display name, and bundle ID match the sender.\n" \
+         "                          First use of a given sender shows the macOS notification-permission prompt.\n" \
+         "       -appIcon PATH      Override the notification icon. Accepts .icns directly; other image\n" \
+         "                          formats (png, jpg, tiff, …) are rendered to .icns automatically.\n" \
+         "                          Combines with -sender (keeps the sender's name, swaps the icon).\n" \
          "       -contentImage URL  The URL of an image to display attached to the notification.\n" \
          "                          Supported types: png, jpg, jpeg, gif. (.icns is NOT supported.)\n" \
          "       -open URL          The URL of a resource to open when the user clicks the notification.\n" \
