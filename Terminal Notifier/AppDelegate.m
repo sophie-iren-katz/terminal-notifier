@@ -1,38 +1,7 @@
 #import "AppDelegate.h"
 #import <ScriptingBridge/ScriptingBridge.h>
-#import <objc/runtime.h>
 
 NSString * const TerminalNotifierBundleID = @"fr.julienxx.oss.terminal-notifier";
-NSString * const NotificationCenterUIBundleID = @"com.apple.notificationcenterui";
-
-NSString *_fakeBundleIdentifier = nil;
-
-@implementation NSBundle (FakeBundleIdentifier)
-
-// Overriding bundleIdentifier works, but overriding NSUserNotificationAlertStyle does not work.
-
-- (NSString *)__bundleIdentifier;
-{
-  if (self == [NSBundle mainBundle]) {
-    return _fakeBundleIdentifier ? _fakeBundleIdentifier : TerminalNotifierBundleID;
-  } else {
-    return [self __bundleIdentifier];
-  }
-}
-
-@end
-
-static BOOL
-InstallFakeBundleIdentifierHook()
-{
-  Class class = objc_getClass("NSBundle");
-  if (class) {
-    method_exchangeImplementations(class_getInstanceMethod(class, @selector(bundleIdentifier)),
-                                   class_getInstanceMethod(class, @selector(__bundleIdentifier)));
-    return YES;
-  }
-  return NO;
-}
 
 @implementation NSUserDefaults (SubscriptAndUnescape)
 - (id)objectForKeyedSubscript:(id)key;
@@ -46,18 +15,8 @@ InstallFakeBundleIdentifierHook()
 @end
 
 
-@implementation AppDelegate
-
-+(void)initializeUserDefaults
-{
-  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-
-  // initialize the dictionary with default values depending on OS level
-  NSDictionary *appDefaults;
-  appDefaults = @{@"sender": @"com.apple.Terminal"};
-
-  // and set them appropriately
-  [defaults registerDefaults:appDefaults];
+@implementation AppDelegate {
+  BOOL _responseHandled;
 }
 
 - (void)printHelpBanner;
@@ -87,12 +46,12 @@ InstallFakeBundleIdentifierHook()
          "       -group ID          A string which identifies the group the notifications belong to.\n" \
          "                          Old notifications with the same ID will be removed.\n" \
          "       -activate ID       The bundle identifier of the application to activate when the user clicks the notification.\n" \
-         "       -sender ID         The bundle identifier of the application that should be shown as the sender, including its icon.\n" \
-         "       -appIcon URL       The URL of a image to display instead of the application icon (Mavericks+ only)\n" \
-         "       -contentImage URL  The URL of a image to display attached to the notification (Mavericks+ only)\n" \
+         "       -sender ID         (Deprecated — no-op under the UserNotifications framework.)\n" \
+         "       -appIcon URL       (Deprecated — no-op under the UserNotifications framework.)\n" \
+         "       -contentImage URL  The URL of an image to display attached to the notification.\n" \
          "       -open URL          The URL of a resource to open when the user clicks the notification.\n" \
          "       -execute COMMAND   A shell command to perform when the user clicks the notification.\n" \
-         "       -ignoreDnD         Send notification even if Do Not Disturb is enabled.\n" \
+         "       -ignoreDnD         Mark notification as time-sensitive (requires entitlement to bypass Focus/DnD).\n" \
          "\n" \
          "When the user activates a notification, the results are logged to the system logs.\n" \
          "Use Console.app to view these logs.\n" \
@@ -113,211 +72,251 @@ InstallFakeBundleIdentifierHook()
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification;
 {
-  NSUserNotification *userNotification = notification.userInfo[NSApplicationLaunchUserNotificationKey];
-  if (userNotification) {
-    [self userActivatedNotification:userNotification];
+  UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+  center.delegate = self;
 
-  } else {
-    if ([[[NSProcessInfo processInfo] arguments] indexOfObject:@"-help"] != NSNotFound) {
-      [self printHelpBanner];
-      exit(0);
-    }
+  NSArray<NSString *> *args = [[NSProcessInfo processInfo] arguments];
+  if ([args containsObject:@"-help"]) { [self printHelpBanner]; exit(0); }
+  if ([args containsObject:@"-version"]) { [self printVersion]; exit(0); }
 
-    if ([[[NSProcessInfo processInfo] arguments] indexOfObject:@"-version"] != NSNotFound) {
-      [self printVersion];
-      exit(0);
-    }
+  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+  NSString *subtitle = defaults[@"subtitle"];
+  NSString *message  = defaults[@"message"];
+  NSString *remove   = defaults[@"remove"];
+  NSString *list     = defaults[@"list"];
+  NSString *sound    = defaults[@"sound"];
 
-    NSArray *runningProcesses = [[[NSWorkspace sharedWorkspace] runningApplications] valueForKey:@"bundleIdentifier"];
-    if ([runningProcesses indexOfObject:NotificationCenterUIBundleID] == NSNotFound) {
-      NSLog(@"[!] Unable to post a notification for the current user (%@), as it has no running NotificationCenter instance.", NSUserName());
+  // If there is no message and data is piped to the application, use that instead.
+  if (message == nil && !isatty(STDIN_FILENO)) {
+    NSData *inputData = [[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile];
+    message = [[NSString alloc] initWithData:inputData encoding:NSUTF8StringEncoding];
+  }
+
+  if (message == nil && remove == nil && list == nil) {
+    // The binary may have been re-launched in response to a notification click;
+    // give the UN delegate a moment to fire didReceiveNotificationResponse:
+    // before assuming this is a bare invocation that should print help.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+      if (!self->_responseHandled) {
+        [self printHelpBanner];
+        exit(1);
+      }
+    });
+    return;
+  }
+
+  if (list) {
+    [self listNotificationWithGroupID:list];
+    return;
+  }
+
+  NSMutableDictionary *options = [NSMutableDictionary dictionary];
+  if (defaults[@"activate"]) options[@"bundleID"]         = defaults[@"activate"];
+  if (defaults[@"group"])    options[@"groupID"]          = defaults[@"group"];
+  if (defaults[@"execute"])  options[@"command"]          = defaults[@"execute"];
+  if (defaults[@"contentImage"]) options[@"contentImage"] = defaults[@"contentImage"];
+
+  if (defaults[@"open"]) {
+    NSURL *url = [NSURL URLWithString:defaults[@"open"]];
+    if ((url && url.scheme && url.host) || [url isFileURL]) {
+      options[@"open"] = defaults[@"open"];
+    } else {
+      NSLog(@"'%@' is not a valid URI.", defaults[@"open"]);
       exit(1);
     }
+  }
 
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+  if ([args containsObject:@"-ignoreDnD"]) {
+    options[@"ignoreDnD"] = @YES;
+  }
 
-    NSString *subtitle = defaults[@"subtitle"];
-    NSString *message  = defaults[@"message"];
-    NSString *remove   = defaults[@"remove"];
-    NSString *list     = defaults[@"list"];
-    NSString *sound    = defaults[@"sound"];
-
-    // If there is no message and data is piped to the application, use that
-    // instead.
-    if (message == nil && !isatty(STDIN_FILENO)) {
-      NSData *inputData = [NSData dataWithData:[[NSFileHandle fileHandleWithStandardInput] readDataToEndOfFile]];
-      message = [[NSString alloc] initWithData:inputData encoding:NSUTF8StringEncoding];
-    }
-
-    if (message == nil && remove == nil && list == nil) {
-      [self printHelpBanner];
-      exit(1);
-    }
-
-    if (list) {
-      [self listNotificationWithGroupID:list];
-      exit(0);
-    }
-
-    // Install the fake bundle ID hook so we can fake the sender. This also
-    // needs to be done to be able to remove a message.
-    if (defaults[@"sender"]) {
-      @autoreleasepool {
-        if (InstallFakeBundleIdentifierHook()) {
-          _fakeBundleIdentifier = defaults[@"sender"];
-        }
-      }
-    }
-
-    if (remove) {
-      [self removeNotificationWithGroupID:remove];
-      if (message == nil || ([message length] == 0)) {
-          exit(0);
-      }
-    }
-
+  void (^deliverIfNeeded)(void) = ^{
     if (message) {
-      NSMutableDictionary *options = [NSMutableDictionary dictionary];
-      if (defaults[@"activate"]) options[@"bundleID"]         = defaults[@"activate"];
-      if (defaults[@"group"])    options[@"groupID"]          = defaults[@"group"];
-      if (defaults[@"execute"])  options[@"command"]          = defaults[@"execute"];
-      if (defaults[@"appIcon"])  options[@"appIcon"]          = defaults[@"appIcon"];
-      if (defaults[@"contentImage"]) options[@"contentImage"] = defaults[@"contentImage"];
-
-      if (defaults[@"open"]) {
-        NSURL *url = [NSURL URLWithString:defaults[@"open"]];
-        if ((url && url.scheme && url.host) || [url isFileURL]) {
-          options[@"open"] = defaults[@"open"];
-        }else{
-          NSLog(@"'%@' is not a valid URI.", defaults[@"open"]);
-          exit(1);
-        }
-      }
-
-      if([[[NSProcessInfo processInfo] arguments] containsObject:@"-ignoreDnD"] == true) {
-        options[@"ignoreDnD"] = @YES;
-      }
-
-      [self deliverNotificationWithTitle:defaults[@"title"] ?: @"Terminal"
-                                subtitle:subtitle
-                                 message:message
-                                 options:options
-                                   sound:sound];
+      [self requestAuthorizationThenDeliverWithTitle:defaults[@"title"] ?: @"Terminal"
+                                            subtitle:subtitle
+                                             message:message
+                                             options:options
+                                               sound:sound];
+    } else {
+      exit(0);
     }
+  };
+
+  if (remove) {
+    [self removeNotificationsWithGroupID:remove completion:deliverIfNeeded];
+  } else {
+    deliverIfNeeded();
   }
 }
 
-- (NSImage*)getImageFromURL:(NSString *) url;
+- (NSURL *)resolveImageURL:(NSString *)url;
 {
   NSURL *imageURL = [NSURL URLWithString:url];
-  if([[imageURL scheme] length] == 0){
-    // Prefix 'file://' if no scheme
+  if ([[imageURL scheme] length] == 0) {
     imageURL = [NSURL fileURLWithPath:url];
   }
-  return [[NSImage alloc] initWithContentsOfURL:imageURL];
+  return imageURL;
 }
 
-/**
- * Decode fragment identifier
- *
- * @see http://tools.ietf.org/html/rfc3986#section-2.1
- * @see http://en.wikipedia.org/wiki/URI_scheme
- */
-- (NSString*)decodeFragmentInURL:(NSString *) encodedURL fragment:(NSString *) framgent
+- (void)requestAuthorizationThenDeliverWithTitle:(NSString *)title
+                                        subtitle:(NSString *)subtitle
+                                         message:(NSString *)message
+                                         options:(NSDictionary *)options
+                                           sound:(NSString *)sound;
 {
-    NSString *beforeStr = [@"%23" stringByAppendingString:framgent];
-    NSString *afterStr = [@"#" stringByAppendingString:framgent];
-    NSString *decodedURL = [encodedURL stringByReplacingOccurrencesOfString:beforeStr withString:afterStr];
-    return decodedURL;
+  UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+  UNAuthorizationOptions authOptions = UNAuthorizationOptionAlert | UNAuthorizationOptionSound;
+  [center requestAuthorizationWithOptions:authOptions
+                        completionHandler:^(BOOL granted, NSError * _Nullable error) {
+    if (error) {
+      NSLog(@"[!] Authorization request failed: %@", error.localizedDescription);
+      exit(1);
+    }
+    if (!granted) {
+      NSLog(@"[!] Notification authorization not granted. Enable notifications for terminal-notifier in System Settings.");
+      exit(1);
+    }
+    [self deliverNotificationWithTitle:title
+                              subtitle:subtitle
+                               message:message
+                               options:options
+                                 sound:sound];
+  }];
 }
 
 - (void)deliverNotificationWithTitle:(NSString *)title
-                             subtitle:(NSString *)subtitle
+                            subtitle:(NSString *)subtitle
                              message:(NSString *)message
                              options:(NSDictionary *)options
                                sound:(NSString *)sound;
 {
-  // First remove earlier notification with the same group ID.
-  if (options[@"groupID"]) [self removeNotificationWithGroupID:options[@"groupID"]];
-
-  NSUserNotification *userNotification = [NSUserNotification new];
-  userNotification.title = title;
-  userNotification.subtitle = subtitle;
-  userNotification.informativeText = message;
-  userNotification.userInfo = options;
-
-  if(options[@"appIcon"]){
-    [userNotification setValue:[self getImageFromURL:options[@"appIcon"]] forKey:@"_identityImage"];
-    [userNotification setValue:@(false) forKey:@"_identityImageHasBorder"];
-  }
-  if(options[@"contentImage"]){
-    userNotification.contentImage = [self getImageFromURL:options[@"contentImage"]];
-  }
+  UNMutableNotificationContent *content = [UNMutableNotificationContent new];
+  content.title = title ?: @"";
+  if (subtitle) content.subtitle = subtitle;
+  content.body = message ?: @"";
+  content.userInfo = options;
 
   if (sound != nil) {
-    userNotification.soundName = [sound isEqualToString: @"default"] ? NSUserNotificationDefaultSoundName : sound ;
+    content.sound = [sound isEqualToString:@"default"]
+        ? [UNNotificationSound defaultSound]
+        : [UNNotificationSound soundNamed:sound];
   }
 
-  if(options[@"ignoreDnD"]){
-    [userNotification setValue:@YES forKey:@"_ignoresDoNotDisturb"];
-  }
-
-  NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
-  center.delegate = self;
-  [center scheduleNotification:userNotification];
-}
-
-- (void)removeNotificationWithGroupID:(NSString *)groupID;
-{
-  NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
-  for (NSUserNotification *userNotification in center.deliveredNotifications) {
-    if ([@"ALL" isEqualToString:groupID] || [userNotification.userInfo[@"groupID"] isEqualToString:groupID]) {
-      NSString *deliveredAt = [userNotification.actualDeliveryDate description];
-      printf("* Removing previously sent notification, which was sent on: %s\n", [deliveredAt UTF8String]);
-      [center removeDeliveredNotification:userNotification];
+  if (options[@"contentImage"]) {
+    NSURL *imageURL = [self resolveImageURL:options[@"contentImage"]];
+    NSError *attachErr = nil;
+    UNNotificationAttachment *attachment =
+      [UNNotificationAttachment attachmentWithIdentifier:@"contentImage"
+                                                     URL:imageURL
+                                                 options:nil
+                                                   error:&attachErr];
+    if (attachment) {
+      content.attachments = @[attachment];
+    } else {
+      NSLog(@"[!] Failed to attach contentImage: %@", attachErr.localizedDescription);
     }
   }
+
+  if (options[@"ignoreDnD"]) {
+    if (@available(macOS 12.0, *)) {
+      content.interruptionLevel = UNNotificationInterruptionLevelTimeSensitive;
+    }
+  }
+
+  // Use the group ID as the request identifier so re-sending the same group
+  // replaces the existing notification, matching the historical behavior.
+  NSString *identifier = options[@"groupID"] ?: [[NSUUID UUID] UUIDString];
+  UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:identifier
+                                                                       content:content
+                                                                       trigger:nil];
+
+  UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+  [center addNotificationRequest:request withCompletionHandler:^(NSError * _Nullable error) {
+    if (error) {
+      NSLog(@"[!] Failed to deliver notification: %@", error.localizedDescription);
+      exit(1);
+    }
+    exit(0);
+  }];
+}
+
+- (void)removeNotificationsWithGroupID:(NSString *)groupID
+                            completion:(void (^)(void))completion;
+{
+  UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+  [center getDeliveredNotificationsWithCompletionHandler:^(NSArray<UNNotification *> *notifications) {
+    NSMutableArray<NSString *> *identifiers = [NSMutableArray array];
+    for (UNNotification *n in notifications) {
+      NSString *deliveredGroupID = n.request.content.userInfo[@"groupID"];
+      if ([@"ALL" isEqualToString:groupID] || [deliveredGroupID isEqualToString:groupID]) {
+        [identifiers addObject:n.request.identifier];
+        printf("* Removing previously sent notification, which was sent on: %s\n",
+               [[n.date description] UTF8String]);
+      }
+    }
+    if (identifiers.count > 0) {
+      [center removeDeliveredNotificationsWithIdentifiers:identifiers];
+    }
+    dispatch_async(dispatch_get_main_queue(), completion);
+  }];
 }
 
 - (void)listNotificationWithGroupID:(NSString *)listGroupID;
 {
-  NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
-
-  NSMutableArray *lines = [NSMutableArray array];
-  for (NSUserNotification *userNotification in center.deliveredNotifications) {
-    NSString *deliveredgroupID = userNotification.userInfo[@"groupID"];
-    NSString *title            = userNotification.title;
-    NSString *subtitle         = userNotification.subtitle;
-    NSString *message          = userNotification.informativeText;
-    NSString *deliveredAt      = [userNotification.actualDeliveryDate description];
-    if ([@"ALL" isEqualToString:listGroupID] || [deliveredgroupID isEqualToString:listGroupID]) {
-      [lines addObject:[NSString stringWithFormat:@"%@\t%@\t%@\t%@\t%@", deliveredgroupID, title, subtitle, message, deliveredAt]];
+  UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+  [center getDeliveredNotificationsWithCompletionHandler:^(NSArray<UNNotification *> *notifications) {
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (UNNotification *n in notifications) {
+      NSString *deliveredGroupID = n.request.content.userInfo[@"groupID"];
+      if ([@"ALL" isEqualToString:listGroupID] || [deliveredGroupID isEqualToString:listGroupID]) {
+        [lines addObject:[NSString stringWithFormat:@"%@\t%@\t%@\t%@\t%@",
+                          deliveredGroupID ?: @"",
+                          n.request.content.title ?: @"",
+                          n.request.content.subtitle ?: @"",
+                          n.request.content.body ?: @"",
+                          [n.date description]]];
+      }
     }
-  }
-
-  if (lines.count > 0) {
-    printf("GroupID\tTitle\tSubtitle\tMessage\tDelivered At\n");
-    for (NSString *line in lines) {
-      printf("%s\n", [line UTF8String]);
+    if (lines.count > 0) {
+      printf("GroupID\tTitle\tSubtitle\tMessage\tDelivered At\n");
+      for (NSString *line in lines) {
+        printf("%s\n", [line UTF8String]);
+      }
     }
-  }
+    exit(0);
+  }];
 }
 
+#pragma mark - UNUserNotificationCenterDelegate
 
-- (void)userActivatedNotification:(NSUserNotification *)userNotification;
+// Show the banner even if our (short-lived) app is foreground when delivery happens.
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler;
 {
-  [[NSUserNotificationCenter defaultUserNotificationCenter] removeDeliveredNotification:userNotification];
+  completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
+}
 
-  NSString *groupID  = userNotification.userInfo[@"groupID"];
-  NSString *bundleID = userNotification.userInfo[@"bundleID"];
-  NSString *command  = userNotification.userInfo[@"command"];
-  NSString *open     = userNotification.userInfo[@"open"];
+// Invoked when the user clicks a delivered notification (relaunches the app).
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+didReceiveNotificationResponse:(UNNotificationResponse *)response
+         withCompletionHandler:(void (^)(void))completionHandler;
+{
+  _responseHandled = YES;
+
+  UNNotification *userNotification = response.notification;
+  NSDictionary *userInfo = userNotification.request.content.userInfo;
+  NSString *groupID  = userInfo[@"groupID"];
+  NSString *bundleID = userInfo[@"bundleID"];
+  NSString *command  = userInfo[@"command"];
+  NSString *open     = userInfo[@"open"];
 
   NSLog(@"User activated notification:");
   NSLog(@" group ID: %@", groupID);
-  NSLog(@"    title: %@", userNotification.title);
-  NSLog(@" subtitle: %@", userNotification.subtitle);
-  NSLog(@"  message: %@", userNotification.informativeText);
+  NSLog(@"    title: %@", userNotification.request.content.title);
+  NSLog(@" subtitle: %@", userNotification.request.content.subtitle);
+  NSLog(@"  message: %@", userNotification.request.content.body);
   NSLog(@"bundle ID: %@", bundleID);
   NSLog(@"  command: %@", command);
   NSLog(@"     open: %@", open);
@@ -327,6 +326,7 @@ InstallFakeBundleIdentifierHook()
   if (command)  success &= [self executeShellCommand:command];
   if (open)     success &= [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:open]];
 
+  completionHandler();
   exit(success ? 0 : 1);
 }
 
@@ -364,19 +364,6 @@ InstallFakeBundleIdentifierHook()
   [task waitUntilExit];
   NSLog(@"command output:\n%@", [[NSString alloc] initWithData:accumulatedData encoding:NSUTF8StringEncoding]);
   return [task terminationStatus] == 0;
-}
-
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center
-     shouldPresentNotification:(NSUserNotification *)userNotification;
-{
-  return YES;
-}
-
-// Once the notification is delivered we can exit.
-- (void)userNotificationCenter:(NSUserNotificationCenter *)center
-        didDeliverNotification:(NSUserNotification *)userNotification;
-{
-  exit(0);
 }
 
 @end

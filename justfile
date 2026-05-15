@@ -17,7 +17,8 @@ macos_deployment_target := "10.13"
 build:
     xcodebuild -project "{{project}}" -configuration Release \
         SYMROOT="{{build_dir}}" \
-        MACOSX_DEPLOYMENT_TARGET={{macos_deployment_target}}
+        MACOSX_DEPLOYMENT_TARGET={{macos_deployment_target}} \
+        OTHER_LDFLAGS='$(inherited) -framework UserNotifications'
 
 # Remove build artifacts
 clean:
