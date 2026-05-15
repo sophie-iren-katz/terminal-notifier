@@ -197,6 +197,25 @@ static BOOL BuildSpoofBundle(NSString *spoofAppPath,
     fprintf(stderr, "[!] sender spoof: codesign exited %d\n", codesign.terminationStatus);
     return NO;
   }
+
+  // Register the spoof with Launch Services so macOS recognises it as an
+  // installed app. Without this, requestAuthorizationWithOptions: returns
+  // "Notifications are not allowed for this application" without ever
+  // surfacing the permission prompt — the OS doesn't know the bundle exists.
+  NSTask *lsregister = [NSTask new];
+  lsregister.launchPath = @"/System/Library/Frameworks/CoreServices.framework/"
+                         @"Versions/Current/Frameworks/LaunchServices.framework/"
+                         @"Versions/Current/Support/lsregister";
+  lsregister.arguments = @[@"-f", spoofAppPath];
+  lsregister.standardOutput = [NSPipe pipe];
+  lsregister.standardError = [NSPipe pipe];
+  @try { [lsregister launch]; [lsregister waitUntilExit]; }
+  @catch (NSException *e) {
+    fprintf(stderr, "[!] sender spoof: lsregister launch failed: %s\n",
+            e.reason.UTF8String);
+    // Non-fatal: a stale Launch Services entry usually still works.
+  }
+
   return YES;
 }
 
