@@ -35,10 +35,3 @@ smoke: build
 which: build
     @echo "{{bin}}"
 
-# Install Ruby gem deps
-ruby-setup:
-    cd Ruby && bundle install
-
-# Run the Ruby gem's RSpec suite
-test:
-    cd Ruby && bundle exec rake spec
